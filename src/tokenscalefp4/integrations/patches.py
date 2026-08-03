@@ -75,9 +75,13 @@ def apply_patch_stack(project: str, checkout: Path) -> list[Path]:
     if result.returncode == 0:
         return patch_stack
 
-    _run_git(checkout, "am", "--abort")
-    failed_patch = patch_stack[0].name
+    apply_error = result.stderr.strip()
+    abort = _run_git(checkout, "am", "--abort")
+    if abort.returncode != 0:
+        raise RuntimeError(
+            f"Failed to apply patch stack for {validated_project}: {apply_error}; "
+            f"rollback failed: {abort.stderr.strip()}"
+        )
     raise RuntimeError(
-        f"Failed to apply patch stack for {validated_project} at {failed_patch}: "
-        f"{result.stderr.strip()}"
+        f"Failed to apply patch stack for {validated_project}: {apply_error}"
     )

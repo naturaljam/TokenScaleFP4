@@ -128,7 +128,7 @@ def test_apply_patch_stack_applies_patches_in_lexical_order(
     base_revision = run_git(upstream_repo, "rev-parse", "HEAD").stdout.strip()
     write_file(upstream_repo, "first.txt", "first\n")
     commit(upstream_repo, "first")
-    write_file(upstream_repo, "second.txt", "second\n")
+    write_file(upstream_repo, "first.txt", "first\nsecond\n")
     commit(upstream_repo, "second")
 
     patch_dir = tmp_path / "upstream" / "flashinfer" / "patches"
@@ -142,10 +142,12 @@ def test_apply_patch_stack_applies_patches_in_lexical_order(
     )
     assert patches_to_export.returncode == 0
     patch_names = sorted(path.name for path in patch_dir.glob("*.patch"))
-    temporary_name = patch_dir / "temporary.patch"
-    (patch_dir / patch_names[0]).rename(temporary_name)
-    (patch_dir / patch_names[1]).rename(patch_dir / "0001-first.patch")
-    temporary_name.rename(patch_dir / "0002-second.patch")
+    temporary_first = patch_dir / "temporary-first.patch"
+    temporary_second = patch_dir / "temporary-second.patch"
+    (patch_dir / patch_names[0]).rename(temporary_first)
+    (patch_dir / patch_names[1]).rename(temporary_second)
+    temporary_second.rename(patch_dir / "0002-second.patch")
+    temporary_first.rename(patch_dir / "0001-first.patch")
 
     checkout = tmp_path / "checkout"
     run_git(tmp_path, "clone", "-q", str(upstream_repo), str(checkout))
@@ -158,9 +160,32 @@ def test_apply_patch_stack_applies_patches_in_lexical_order(
         "0001-first.patch",
         "0002-second.patch",
     ]
-    assert (checkout / "first.txt").read_text(encoding="utf-8") == "first\n"
-    assert (checkout / "second.txt").read_text(encoding="utf-8") == "second\n"
+    assert (checkout / "first.txt").read_text(encoding="utf-8") == (
+        "first\nsecond\n"
+    )
     assert run_git(checkout, "status", "--porcelain").stdout == ""
+
+
+def test_apply_patch_stack_skips_git_am_when_no_patches_exist(
+    upstream_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checkout = tmp_path / "checkout"
+    run_git(tmp_path, "clone", "-q", str(upstream_repo), str(checkout))
+    monkeypatch.setattr(patches, "REPO_ROOT", tmp_path)
+
+    calls: list[tuple[str, ...]] = []
+    original_run_git = patches._run_git
+
+    def recording_run_git(
+        checkout_path: Path, *args: str
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return original_run_git(checkout_path, *args)
+
+    monkeypatch.setattr(patches, "_run_git", recording_run_git)
+
+    assert apply_patch_stack("flashinfer", checkout) == []
+    assert calls == [("status", "--porcelain=v1", "--untracked-files=all")]
 
 
 def test_failing_patch_stack_aborts_git_am(
@@ -188,13 +213,44 @@ def test_failing_patch_stack_aborts_git_am(
     run_git(checkout, "reset", "--hard", "-q", base_revision)
     monkeypatch.setattr(patches, "REPO_ROOT", tmp_path)
 
-    with pytest.raises(RuntimeError, match=r"flashinfer.*0001-.*\.patch"):
+    with pytest.raises(RuntimeError, match=r"Failed to apply patch stack for flashinfer"):
         apply_patch_stack("flashinfer", checkout)
 
     assert run_git(checkout, "status", "--porcelain").stdout == ""
     assert not (checkout / ".git" / "rebase-apply").exists()
     assert not (checkout / "temporary.txt").exists()
     assert run_git(checkout, "rev-parse", "HEAD").stdout.strip() == base_revision
+
+
+def test_failing_patch_stack_reports_abort_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    patch_dir = tmp_path / "upstream" / "flashinfer" / "patches"
+    patch_dir.mkdir(parents=True)
+    (patch_dir / "0001-change.patch").write_text("patch\n", encoding="utf-8")
+    monkeypatch.setattr(patches, "REPO_ROOT", tmp_path)
+
+    def failing_run_git(
+        checkout_path: Path, *args: str
+    ) -> subprocess.CompletedProcess[str]:
+        del checkout_path
+        if args[0] == "status":
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        if args == ("am", "--abort"):
+            return subprocess.CompletedProcess(
+                args, 1, stdout="", stderr="abort failed"
+            )
+        return subprocess.CompletedProcess(args, 1, stdout="", stderr="apply failed")
+
+    monkeypatch.setattr(patches, "_run_git", failing_run_git)
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"flashinfer.*apply failed.*rollback failed.*abort failed",
+    ):
+        apply_patch_stack("flashinfer", checkout)
 
 
 def test_checkout_only_command_accepts_one_project() -> None:
