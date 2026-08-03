@@ -3,6 +3,10 @@ Copyright 2026 TokenScaleFP4 contributors
 
 This product includes original code developed for the TokenScaleFP4 project.
 
+The project is designed to interoperate with FlashInfer and vLLM. Those
+projects are separately developed and distributed under their respective
+license terms; no code from either project is included in this bootstrap.
+
 No upstream patches are included in the initial package bootstrap. Patches
 adapted from upstream open-source projects will retain their original copyright
 and attribution notices in the files where they are incorporated and remain

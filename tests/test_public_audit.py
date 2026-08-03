@@ -59,6 +59,25 @@ def test_safe_markdown_passes_tracked_audit(git_repo: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    "content",
+    [
+        "docs/setup.md describes repo/relative/example.txt\n",
+        "route = /api/v1/inference\n",
+        "artifact = workspace/checkpoints/model.pt\n",
+    ],
+)
+def test_repo_relative_text_passes_tracked_audit(
+    git_repo: Path, content: str
+) -> None:
+    write_and_track(git_repo, "notes.txt", content)
+    run_git(git_repo, "commit", "-qm", "safe relative-path fixture")
+
+    result = run_audit(git_repo)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
     ("relative_path", "content", "rule"),
     [
         (
@@ -77,10 +96,40 @@ def test_safe_markdown_passes_tracked_audit(git_repo: Path) -> None:
             "/" + "home/alice/private/checkpoint.bin",
             "machine-specific absolute path",
         ),
+        (
+            "windows-path.txt",
+            "D:" + r"\research\private\checkpoint.bin",
+            "machine-specific absolute path",
+        ),
+        (
+            "root-path.txt",
+            "/" + "root/private/checkpoint.bin",
+            "machine-specific absolute path",
+        ),
+        (
+            "tmp-path.txt",
+            "/" + "tmp/private/checkpoint.bin",
+            "machine-specific absolute path",
+        ),
+        (
+            "workspace-path.txt",
+            "/" + "workspace/private/checkpoint.bin",
+            "machine-specific absolute path",
+        ),
         ("payload.dat", b"0" * (6 * 1024 * 1024), "file size exceeds 5 MiB"),
         ("extension.pt", b"synthetic weights", "forbidden extension"),
     ],
-    ids=["credential", "private-key", "absolute-home", "oversized", "extension"],
+    ids=[
+        "credential",
+        "private-key",
+        "absolute-home",
+        "absolute-windows-drive",
+        "absolute-root",
+        "absolute-tmp",
+        "absolute-workspace",
+        "oversized",
+        "extension",
+    ],
 )
 def test_tracked_audit_rejects_unsafe_files_without_leaking_content(
     git_repo: Path,
@@ -111,3 +160,50 @@ def test_staged_audit_reads_index_blob_not_worktree(git_repo: Path) -> None:
     assert result.returncode == 1
     assert output.strip() == "config.txt: secret pattern"
     assert credential not in output
+
+
+def test_detect_secrets_scans_staged_blob_without_leaking_match(
+    git_repo: Path,
+) -> None:
+    credential = "auth_token = " + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6"
+    write_and_track(git_repo, "detector-only.txt", credential)
+    (git_repo / "detector-only.txt").write_text(
+        "safe working tree contents\n", encoding="utf-8"
+    )
+
+    result = run_audit(git_repo, "--staged")
+    output = result.stdout + result.stderr
+
+    assert result.returncode == 1
+    assert output.strip() == "detector-only.txt: secret pattern"
+    assert credential not in output
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "program.exe",
+        "extension.pyd",
+        "cache.pyc",
+        "package.whl",
+        "bundle.zip",
+        "bundle.tar",
+        "bundle.tar.gz",
+        "bundle.tar.bz2",
+        "bundle.tgz",
+        "bundle.tar.zst",
+        "bundle.7z",
+    ],
+)
+def test_tracked_audit_rejects_build_products_and_archives(
+    git_repo: Path, relative_path: str
+) -> None:
+    write_and_track(git_repo, relative_path, b"synthetic artifact")
+    run_git(git_repo, "commit", "-qm", "artifact fixture")
+
+    result = run_audit(git_repo)
+
+    assert result.returncode == 1
+    assert (result.stdout + result.stderr).strip() == (
+        f"{relative_path}: forbidden extension"
+    )

@@ -3,19 +3,26 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 MAX_FILE_SIZE = 5 * 1024 * 1024
 FORBIDDEN_EXTENSIONS = {
     ".a",
     ".bin",
+    ".bz2",
     ".ckpt",
     ".cubin",
     ".dll",
     ".dylib",
+    ".exe",
+    ".gz",
+    ".jar",
     ".lib",
     ".npy",
     ".npz",
@@ -24,8 +31,19 @@ FORBIDDEN_EXTENSIONS = {
     ".onnx",
     ".pt",
     ".pth",
+    ".pyc",
+    ".pyd",
+    ".rar",
     ".safetensors",
     ".so",
+    ".tar",
+    ".tgz",
+    ".txz",
+    ".whl",
+    ".xz",
+    ".zip",
+    ".zst",
+    ".7z",
 }
 SECRET_PATTERNS = (
     re.compile(rb"-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----"),
@@ -37,8 +55,13 @@ SECRET_PATTERNS = (
     re.compile(rb"gh[pousr]_[A-Za-z0-9]{20,}"),
 )
 ABSOLUTE_PATH_PATTERNS = (
-    re.compile(rb"(?<![A-Za-z0-9_])/(?:home|Users)/[^/\s]+/"),
-    re.compile(rb"(?i)(?<![A-Za-z0-9_])[A-Z]:[\\/](?:Users|Documents and Settings)[\\/]"),
+    re.compile(
+        rb"(?<![A-Za-z0-9_])/(?:"
+        rb"(?:home|Users)/[^/\s]+|"
+        rb"(?:private/)?tmp|root|var/tmp|workspace"
+        rb")(?:[/\s]|$)"
+    ),
+    re.compile(rb"(?i)(?<![A-Za-z0-9_])[A-Z]:[\\/]"),
 )
 
 
@@ -66,6 +89,36 @@ def read_blob(path: str, mode: str) -> bytes:
     return Path(path).read_bytes()
 
 
+def detect_secret_paths(blobs: dict[str, bytes]) -> set[str]:
+    with tempfile.TemporaryDirectory(prefix="public-repo-audit-") as directory:
+        scan_root = Path(directory)
+        for path, content in blobs.items():
+            destination = scan_root.joinpath(*PurePosixPath(path).parts)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(content)
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "detect_secrets",
+                "-C",
+                str(scan_root),
+                "scan",
+                "--all-files",
+                "--slim",
+                "--no-verify",
+                ".",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        baseline: dict[str, Any] = json.loads(result.stdout)
+
+    results: dict[str, list[object]] = baseline.get("results", {})
+    return {PurePosixPath(path).as_posix() for path, matches in results.items() if matches}
+
+
 def audit_blob(path: str, content: bytes) -> list[str]:
     violations: list[str] = []
     suffix = PurePosixPath(path).suffix.lower()
@@ -91,11 +144,14 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     mode = "--staged" if args.staged else "--tracked"
-    violations = [
-        (path, rule)
-        for path in selected_paths(mode)
-        for rule in audit_blob(path, read_blob(path, mode))
-    ]
+    blobs = {path: read_blob(path, mode) for path in selected_paths(mode)}
+    detected_secret_paths = detect_secret_paths(blobs)
+    violations: list[tuple[str, str]] = []
+    for path, content in blobs.items():
+        rules = audit_blob(path, content)
+        violations.extend((path, rule) for rule in rules)
+        if path in detected_secret_paths and "secret pattern" not in rules:
+            violations.append((path, "secret pattern"))
     for path, rule in violations:
         print(f"{path}: {rule}", file=sys.stderr)
     return 1 if violations else 0
