@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: Apache-2.0
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tokenscalefp4"
+version = "0.1.0.dev0"
+description = "SM120-only token-scaled FP4 inference primitives"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "TokenScaleFP4 contributors" }]
+classifiers = [
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+
+[project.optional-dependencies]
+dev = [
+  "detect-secrets>=1.5",
+  "pyright>=1.1.403",
+  "pytest>=8.3",
+  "ruff>=0.12",
+]
+gpu = ["torch>=2.8"]
+eval = ["lm-eval>=0.4.8"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tokenscalefp4"]
+
+[tool.pytest.ini_options]
+markers = ["sm120: requires an NVIDIA SM120 GPU and CUDA 13+"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.pyright]
+include = ["src"]
+typeCheckingMode = "strict"
+pythonVersion = "3.11"

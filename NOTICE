@@ -1,0 +1,9 @@
+TokenScaleFP4
+Copyright 2026 TokenScaleFP4 contributors
+
+This product includes original code developed for the TokenScaleFP4 project.
+
+No upstream patches are included in the initial package bootstrap. Patches
+adapted from upstream open-source projects will retain their original copyright
+and attribution notices in the files where they are incorporated and remain
+subject to their respective upstream license terms.
