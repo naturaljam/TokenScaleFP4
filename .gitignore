@@ -1,0 +1,74 @@
+# Secrets and machine-local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+credentials*
+secrets/
+
+# Python environments and caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Builds and compiled artifacts
+build/
+dist/
+*.egg-info/
+*.whl
+*.so
+*.dll
+*.dylib
+*.pyd
+*.ptx
+*.cubin
+*.fatbin
+
+# Models and datasets
+models/
+checkpoints/
+datasets/
+downloads/
+*.safetensors
+*.ckpt
+*.pth
+*.pt
+*.onnx
+*.gguf
+
+# Upstream working copies and dependency caches
+.third_party/
+third_party/
+forks/
+.cache/
+torch_extensions/
+
+# Raw profiling and local experiment artifacts
+artifacts/
+profiles/raw/
+reports/raw/
+reports/local/
+*.ncu-rep
+*.nsys-rep
+*.sqlite
+*.trace.json
+*.trace.json.gz
+*.log
+core.[0-9]*
+core_dump*
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
