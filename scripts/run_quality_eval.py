@@ -349,11 +349,7 @@ def evaluate_perplexity(
             )
             greedy_token_ids.extend(logits.argmax(dim=-1).reshape(-1).cpu().tolist())
             target_logprobs.extend(selected_logprobs.reshape(-1).cpu().tolist())
-            nll = functional.cross_entropy(
-                logits.reshape(-1, logits.shape[-1]),
-                labels.reshape(-1),
-                reduction="sum",
-            )
+            nll = -selected_logprobs.sum()
             all_finite = all_finite and bool(torch.isfinite(nll).item())
             total_nll += float(nll.item())
             token_count += labels.numel()

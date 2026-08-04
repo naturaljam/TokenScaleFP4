@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import runpy
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ from tokenscalefp4.reference import (
 )
 
 REPO_ROOT = Path(__file__).parents[2]
+ORACLE_REPORT = REPO_ROOT / "reports" / "local" / "unfused-oracle.json"
 
 
 def load_script(name: str) -> dict[str, Any]:
@@ -95,3 +97,17 @@ def test_unfused_oracle_matches_fp32_dequantized_reference() -> None:
     nrmse = normalized_rmse(actual.cpu(), expected.cpu())
     assert cosine >= 0.999, f"cosine={cosine:.9f}, normalized_rmse={nrmse:.9f}"
     assert nrmse >= 0.0
+    report = {
+        "schema_version": 1,
+        "seed": 20260803,
+        "shape": {"m": m, "n": n, "k": k},
+        "cosine_similarity": cosine,
+        "normalized_rmse": nrmse,
+        "all_finite": True,
+    }
+    ORACLE_REPORT.parent.mkdir(parents=True, exist_ok=True)
+    ORACLE_REPORT.write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    assert json.loads(ORACLE_REPORT.read_text(encoding="utf-8")) == report
