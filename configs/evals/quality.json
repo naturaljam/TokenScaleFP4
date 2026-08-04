@@ -5,7 +5,8 @@
     "subset": "wikitext-2-raw-v1",
     "split": "test",
     "seed": 20260803,
-    "max_relative_increase": 0.05
+    "max_relative_increase": 0.05,
+    "revision": "b08601e04326c79dfdd32d625aee71d232d685c3"
   },
   "gsm8k": {
     "dataset": "openai/gsm8k",
@@ -13,9 +14,12 @@
     "split": "test",
     "seed": 20260803,
     "max_absolute_drop": 0.02,
-    "decoding": "greedy"
+    "decoding": "greedy",
+    "revision": "740312add88f781978c0658806c59bc2815b9866"
   },
   "finite_required": true,
   "local_model": "Qwen/Qwen2.5-1.5B",
-  "final_model": "Qwen/Qwen2.5-7B"
+  "final_model": "Qwen/Qwen2.5-7B",
+  "local_model_revision": "8faed761d45a263340a0528343f099c05c9a4323",
+  "final_model_revision": "d149729398750b98c0af14eb82c78cfe92750796"
 }
