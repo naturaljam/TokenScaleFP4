@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
+import zipfile
+from pathlib import Path
+
 import pytest
 
 from tokenscalefp4.kernel_lab.shapes import GemmShape, load_shape_suite
@@ -44,3 +50,47 @@ def test_shape_suite_accepts_stable_short_model_names() -> None:
 def test_shape_suite_rejects_unknown_models() -> None:
     with pytest.raises(ValueError, match="Unknown shape suite"):
         load_shape_suite("Qwen/unknown")
+
+
+def test_shape_suite_is_available_from_a_built_wheel(tmp_path: Path) -> None:
+    repo_root = Path(__file__).parents[2]
+    wheel_dir = tmp_path / "wheel"
+    wheel_dir.mkdir()
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "wheel",
+            ".",
+            "--no-deps",
+            "--no-build-isolation",
+            "--wheel-dir",
+            str(wheel_dir),
+        ],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    wheel = next(wheel_dir.glob("tokenscalefp4-*.whl"))
+    extracted = tmp_path / "installed"
+    with zipfile.ZipFile(wheel) as archive:
+        archive.extractall(extracted)
+
+    command = (
+        "import json,sys;"
+        f"sys.path.insert(0,{str(extracted)!r});"
+        "from tokenscalefp4.kernel_lab import load_shape_suite;"
+        "print(json.dumps(len(load_shape_suite('Qwen/Qwen2.5-1.5B'))))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", command],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == 40

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from importlib.resources import files
 from pathlib import Path
 from typing import cast
 
@@ -33,8 +34,17 @@ def _object(value: object, path: str) -> dict[str, object]:
 
 
 def _load_config() -> dict[str, object]:
-    decoded: object = json.loads(SHAPE_CONFIG.read_text(encoding="utf-8"))
-    payload = _object(decoded, str(SHAPE_CONFIG))
+    if SHAPE_CONFIG.is_file():
+        config_text = SHAPE_CONFIG.read_text(encoding="utf-8")
+        config_location = str(SHAPE_CONFIG)
+    else:
+        packaged_config = files("tokenscalefp4").joinpath(
+            "configs", "shapes", "qwen2_5.json"
+        )
+        config_text = packaged_config.read_text(encoding="utf-8")
+        config_location = str(packaged_config)
+    decoded: object = json.loads(config_text)
+    payload = _object(decoded, config_location)
     if payload.get("schema_version") != 1:
         raise ValueError(f"Unsupported shape configuration: {SHAPE_CONFIG}")
     return payload

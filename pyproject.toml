@@ -24,6 +24,7 @@ classifiers = [
 [project.optional-dependencies]
 dev = [
   "detect-secrets>=1.5",
+  "hatchling>=1.27",
   "jsonschema>=4.23",
   "pyright>=1.1.403",
   "pytest>=8.3",
@@ -34,6 +35,9 @@ eval = ["lm-eval>=0.4.8"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tokenscalefp4"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"configs/shapes/qwen2_5.json" = "tokenscalefp4/configs/shapes/qwen2_5.json"
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-markers"
