@@ -348,13 +348,18 @@ def load_dataset_split(
     return loader("parquet", data_files={split: parquet_files}, split=split)
 
 
+def select_token_metrics(logits: Any, labels: Any) -> tuple[Any, Any]:
+    target_logits = logits.gather(-1, labels.unsqueeze(-1)).squeeze(-1)
+    target_logprobs = target_logits - logits.logsumexp(dim=-1)
+    return logits.argmax(dim=-1), target_logprobs
+
+
 def evaluate_perplexity(
     model: Any,
     tokenizer: Any,
     settings: QualitySettings,
 ) -> tuple[float, int, bool, list[int], list[float]]:
     import torch
-    from torch.nn import functional
 
     dataset = load_dataset_split(
         settings.perplexity,
@@ -381,14 +386,15 @@ def evaluate_perplexity(
             input_ids = window.unsqueeze(0).to(device)
             outputs = model(input_ids=input_ids, use_cache=False)
             logits = outputs.logits[:, :-1].float()
+            del outputs
             labels = input_ids[:, 1:]
             all_finite = all_finite and bool(torch.isfinite(logits).all().item())
-            logprobs = functional.log_softmax(logits, dim=-1)
-            selected_logprobs = logprobs.gather(-1, labels.unsqueeze(-1)).squeeze(-1)
+            greedy, selected_logprobs = select_token_metrics(logits, labels)
+            del logits
             all_finite = all_finite and bool(
                 torch.isfinite(selected_logprobs).all().item()
             )
-            greedy_token_ids.extend(logits.argmax(dim=-1).reshape(-1).cpu().tolist())
+            greedy_token_ids.extend(greedy.reshape(-1).cpu().tolist())
             target_logprobs.extend(selected_logprobs.reshape(-1).cpu().tolist())
             nll = -selected_logprobs.sum()
             all_finite = all_finite and bool(torch.isfinite(nll).item())

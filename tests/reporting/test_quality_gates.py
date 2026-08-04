@@ -480,6 +480,23 @@ def test_perplexity_from_nll_uses_token_count() -> None:
     )
 
 
+def test_target_logprobs_match_log_softmax_without_full_probability_tensor() -> None:
+    quality = load_script("run_quality_eval.py")
+    logits = torch.tensor(
+        [[[1.0, 2.0, -1.0], [0.5, -0.5, 3.0]]],
+        dtype=torch.float32,
+    )
+    labels = torch.tensor([[0, 2]])
+
+    greedy, selected = quality.select_token_metrics(logits, labels)
+
+    expected = torch.log_softmax(logits, dim=-1).gather(
+        -1, labels.unsqueeze(-1)
+    ).squeeze(-1)
+    assert torch.equal(greedy, torch.tensor([[1, 2]]))
+    assert torch.allclose(selected, expected, rtol=1e-6, atol=1e-6)
+
+
 @pytest.mark.parametrize(
     ("generated", "expected"),
     [
