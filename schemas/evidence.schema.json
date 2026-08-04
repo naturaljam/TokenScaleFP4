@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/naturaljam/TokenScaleFP4/schemas/evidence.schema.json",
+  "title": "TokenScaleFP4 Evidence Record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "upstream",
+    "environment",
+    "seed",
+    "command",
+    "raw_samples",
+    "gate"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "upstream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["flashinfer_sha", "vllm_sha"],
+      "properties": {
+        "flashinfer_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "vllm_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "gpu_name",
+        "compute_capability",
+        "cuda_version",
+        "pytorch_version",
+        "flashinfer_version",
+        "vllm_version"
+      ],
+      "properties": {
+        "gpu_name": {"type": "string", "minLength": 1},
+        "compute_capability": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+$"
+        },
+        "cuda_version": {"type": "string", "minLength": 1},
+        "pytorch_version": {"type": "string", "minLength": 1},
+        "flashinfer_version": {"type": "string", "minLength": 1},
+        "vllm_version": {"type": "string", "minLength": 1}
+      }
+    },
+    "seed": {"type": "integer"},
+    "command": {"type": "string", "minLength": 1},
+    "raw_samples": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reference", "sha256"],
+      "properties": {
+        "reference": {"type": "string", "minLength": 1},
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "threshold", "observed", "passed"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "threshold": {"type": ["number", "string"]},
+        "observed": {"type": ["number", "string"]},
+        "passed": {"type": "boolean"}
+      }
+    }
+  }
+}

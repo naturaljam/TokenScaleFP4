@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "perplexity": {
+    "dataset": "Salesforce/wikitext",
+    "subset": "wikitext-2-raw-v1",
+    "split": "test",
+    "seed": 20260803,
+    "max_relative_increase": 0.05
+  },
+  "gsm8k": {
+    "dataset": "openai/gsm8k",
+    "subset": "main",
+    "split": "test",
+    "seed": 20260803,
+    "max_absolute_drop": 0.02,
+    "decoding": "greedy"
+  },
+  "finite_required": true,
+  "local_model": "Qwen/Qwen2.5-1.5B",
+  "final_model": "Qwen/Qwen2.5-7B"
+}

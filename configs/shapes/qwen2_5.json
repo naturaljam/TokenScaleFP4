@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "m_values": [1, 2, 4, 8, 16, 32, 128, 256, 512, 1024],
+  "models": {
+    "Qwen/Qwen2.5-1.5B": {
+      "aliases": ["qwen2.5-1.5b"],
+      "projections": [
+        {"name": "q_proj", "n": 1536, "k": 1536},
+        {"name": "k_proj", "n": 256, "k": 1536},
+        {"name": "v_proj", "n": 256, "k": 1536},
+        {"name": "o_proj", "n": 1536, "k": 1536},
+        {"name": "gate_up_proj", "n": 8960, "k": 1536},
+        {"name": "down_proj", "n": 1536, "k": 8960}
+      ]
+    },
+    "Qwen/Qwen2.5-7B": {
+      "aliases": ["qwen2.5-7b"],
+      "projections": [
+        {"name": "q_proj", "n": 3584, "k": 3584},
+        {"name": "k_proj", "n": 512, "k": 3584},
+        {"name": "v_proj", "n": 512, "k": 3584},
+        {"name": "o_proj", "n": 3584, "k": 3584},
+        {"name": "gate_up_proj", "n": 18944, "k": 3584},
+        {"name": "down_proj", "n": 3584, "k": 18944}
+      ]
+    }
+  }
+}

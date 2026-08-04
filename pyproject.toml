@@ -24,6 +24,7 @@ classifiers = [
 [project.optional-dependencies]
 dev = [
   "detect-secrets>=1.5",
+  "jsonschema>=4.23",
   "pyright>=1.1.403",
   "pytest>=8.3",
   "ruff>=0.12",
