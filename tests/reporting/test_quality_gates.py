@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import importlib.util
 import json
+from argparse import Namespace
 from pathlib import Path
 from types import ModuleType
 
 import pytest
 import torch
 from torch import nn
+
+from tokenscalefp4.reporting import EvidenceRecord
 
 REPO_ROOT = Path(__file__).parents[2]
 
@@ -54,6 +57,19 @@ def quality_payload(
         },
         "all_finite": all_finite,
     }
+
+
+def add_token_trace(
+    payload: dict[str, object],
+    *,
+    greedy_token_ids: list[int],
+    target_logprobs: list[float],
+) -> dict[str, object]:
+    payload["token_trace"] = {
+        "greedy_token_ids": greedy_token_ids,
+        "target_logprobs": target_logprobs,
+    }
+    return payload
 
 
 def test_quality_gate_accepts_exact_thresholds() -> None:
@@ -136,6 +152,115 @@ def test_quality_gate_rejects_mismatched_evaluation_metadata() -> None:
         )
 
 
+def test_token_comparison_reports_agreement_and_logprob_drift() -> None:
+    quality = load_script("run_quality_eval.py")
+    baseline = add_token_trace(
+        quality_payload(mode="bf16", perplexity=10.0, gsm8k_accuracy=0.50),
+        greedy_token_ids=[2, 4, 6],
+        target_logprobs=[-1.0, -2.0, -3.0],
+    )
+    candidate = add_token_trace(
+        quality_payload(
+            mode="nvfp4-unfused", perplexity=10.2, gsm8k_accuracy=0.49
+        ),
+        greedy_token_ids=[2, 5, 6],
+        target_logprobs=[-1.1, -1.8, -3.3],
+    )
+
+    comparison = quality.compare_token_traces(baseline, candidate)
+
+    assert comparison == {
+        "sample_count": 3,
+        "greedy_token_agreement": pytest.approx(2 / 3),
+        "mean_absolute_target_logprob_drift": pytest.approx(0.2),
+    }
+
+
+def test_bad_candidate_makes_cli_write_verdict_and_exit_nonzero(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    quality = load_script("run_quality_eval.py")
+    baseline = add_token_trace(
+        quality_payload(mode="bf16", perplexity=10.0, gsm8k_accuracy=0.50),
+        greedy_token_ids=[2],
+        target_logprobs=[-1.0],
+    )
+    candidate = add_token_trace(
+        quality_payload(
+            mode="nvfp4-unfused", perplexity=11.0, gsm8k_accuracy=0.40
+        ),
+        greedy_token_ids=[3],
+        target_logprobs=[-2.0],
+    )
+    baseline_path = tmp_path / "bf16.json"
+    output_path = tmp_path / "unfused.json"
+    baseline_path.write_text(json.dumps(baseline), encoding="utf-8")
+    settings = quality.load_quality_settings(
+        REPO_ROOT / "configs" / "evals" / "quality.json",
+        "Qwen/Qwen2.5-1.5B",
+    )
+    monkeypatch.setattr(
+        quality,
+        "parse_args",
+        lambda: Namespace(
+            model=settings.model,
+            mode="nvfp4-unfused",
+            output=output_path,
+            evidence_output=tmp_path / "evidence.json",
+            baseline=baseline_path,
+            config=REPO_ROOT / "configs" / "evals" / "quality.json",
+            device="cuda",
+        ),
+    )
+    monkeypatch.setattr(quality, "run_quality_evaluation", lambda *_a, **_k: candidate)
+    monkeypatch.setattr(quality, "write_quality_evidence", lambda *_a, **_k: None)
+
+    assert quality.main() == 1
+    written = json.loads(output_path.read_text(encoding="utf-8"))
+    assert written["comparison"]["gates"] == {
+        "perplexity_passed": False,
+        "gsm8k_passed": False,
+        "finite_passed": True,
+        "passed": False,
+    }
+
+
+def test_quality_evidence_wrapper_round_trips_frozen_schema(tmp_path: Path) -> None:
+    quality = load_script("run_quality_eval.py")
+    settings = quality.load_quality_settings(
+        REPO_ROOT / "configs" / "evals" / "quality.json",
+        "Qwen/Qwen2.5-1.5B",
+    )
+    raw_path = tmp_path / "quality.json"
+    raw_path.write_text('{"all_finite": true}\n', encoding="utf-8")
+    evidence_path = tmp_path / "quality-evidence.json"
+    environment = {
+        "flashinfer_sha": "1" * 40,
+        "vllm_sha": "2" * 40,
+        "gpu_product_name": "NVIDIA GeForce RTX 5070 Laptop GPU",
+        "compute_capability": "12.0",
+        "torch_cuda": "13.0",
+        "pytorch": "2.11.0+cu130",
+        "packages": {"flashinfer-python": "0.6.17"},
+    }
+    gate = quality.QualityGateResult(0.03, 0.01, True, True, True)
+
+    quality.write_quality_evidence(
+        evidence_path,
+        raw_path=raw_path,
+        settings=settings,
+        command="python scripts/run_quality_eval.py --mode nvfp4-unfused",
+        environment=environment,
+        gate=gate,
+    )
+
+    record = EvidenceRecord.from_json(evidence_path)
+    assert record.raw_samples.reference == "external://quality/quality.json"
+    assert record.gate.name == "unfused_quality_feasibility"
+    assert record.gate.passed is True
+
+
 def test_memory_gate_uses_actual_allocated_quantized_bytes() -> None:
     memory = load_script("run_memory_report.py")
 
@@ -148,6 +273,7 @@ def test_memory_gate_uses_actual_allocated_quantized_bytes() -> None:
         block_scale_bytes=30,
         global_scale_bytes=10,
         padding_bytes=20,
+        steady_state_cuda_bytes=500,
         peak_cuda_bytes=700,
     )
 
@@ -167,6 +293,7 @@ def test_memory_gate_rejects_reduction_below_threshold() -> None:
         block_scale_bytes=40,
         global_scale_bytes=10,
         padding_bytes=10,
+        steady_state_cuda_bytes=500,
         peak_cuda_bytes=700,
     )
 
@@ -348,6 +475,7 @@ def test_memory_payload_records_steady_state_and_peak_bytes() -> None:
         block_scale_bytes=30,
         global_scale_bytes=10,
         padding_bytes=20,
+        steady_state_cuda_bytes=500,
         peak_cuda_bytes=700,
     )
 
@@ -365,5 +493,6 @@ def test_memory_payload_records_steady_state_and_peak_bytes() -> None:
         "padding_bytes": 20,
         "quantized_allocated_bytes": 310,
         "reduction": pytest.approx(0.69),
+        "steady_state_cuda_bytes": 500,
         "peak_cuda_bytes": 700,
     }

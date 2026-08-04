@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import importlib.metadata
 import json
 import math
 import random
@@ -186,10 +188,12 @@ def build_quality_payload(
     gsm8k_accuracy: float,
     gsm8k_sample_count: int,
     all_finite: bool,
+    greedy_token_ids: list[int] | None = None,
+    target_logprobs: list[float] | None = None,
 ) -> dict[str, Any]:
     if mode not in {"bf16", "nvfp4-unfused"}:
         raise ValueError("mode must be 'bf16' or 'nvfp4-unfused'")
-    return {
+    payload = {
         "schema_version": 1,
         "model": settings.model,
         "model_revision": settings.model_revision,
@@ -211,6 +215,16 @@ def build_quality_payload(
         },
         "all_finite": all_finite,
     }
+    if greedy_token_ids is not None or target_logprobs is not None:
+        if greedy_token_ids is None or target_logprobs is None:
+            raise ValueError("both token trace fields must be provided")
+        if len(greedy_token_ids) != len(target_logprobs):
+            raise ValueError("token trace fields must have equal lengths")
+        payload["token_trace"] = {
+            "greedy_token_ids": greedy_token_ids,
+            "target_logprobs": target_logprobs,
+        }
+    return payload
 
 
 def perplexity_from_totals(*, total_nll: float, token_count: int) -> float:
@@ -294,7 +308,7 @@ def evaluate_perplexity(
     model: Any,
     tokenizer: Any,
     settings: QualitySettings,
-) -> tuple[float, int, bool]:
+) -> tuple[float, int, bool, list[int], list[float]]:
     import torch
     from datasets import load_dataset
     from torch.nn import functional
@@ -316,6 +330,8 @@ def evaluate_perplexity(
     total_nll = 0.0
     token_count = 0
     all_finite = True
+    greedy_token_ids: list[int] = []
+    target_logprobs: list[float] = []
     with torch.inference_mode():
         for start in range(0, max(tokens.numel() - 1, 0), QUALITY_WINDOW_TOKENS):
             window = tokens[start : start + QUALITY_WINDOW_TOKENS]
@@ -326,6 +342,13 @@ def evaluate_perplexity(
             logits = outputs.logits[:, :-1].float()
             labels = input_ids[:, 1:]
             all_finite = all_finite and bool(torch.isfinite(logits).all().item())
+            logprobs = functional.log_softmax(logits, dim=-1)
+            selected_logprobs = logprobs.gather(-1, labels.unsqueeze(-1)).squeeze(-1)
+            all_finite = all_finite and bool(
+                torch.isfinite(selected_logprobs).all().item()
+            )
+            greedy_token_ids.extend(logits.argmax(dim=-1).reshape(-1).cpu().tolist())
+            target_logprobs.extend(selected_logprobs.reshape(-1).cpu().tolist())
             nll = functional.cross_entropy(
                 logits.reshape(-1, logits.shape[-1]),
                 labels.reshape(-1),
@@ -338,6 +361,8 @@ def evaluate_perplexity(
         perplexity_from_totals(total_nll=total_nll, token_count=token_count),
         token_count,
         all_finite,
+        greedy_token_ids,
+        target_logprobs,
     )
 
 
@@ -415,9 +440,13 @@ def run_quality_evaluation(
         mode=mode,
         device=device,
     )
-    perplexity, perplexity_count, ppl_finite = evaluate_perplexity(
-        model, tokenizer, settings
-    )
+    (
+        perplexity,
+        perplexity_count,
+        ppl_finite,
+        greedy_token_ids,
+        target_logprobs,
+    ) = evaluate_perplexity(model, tokenizer, settings)
     gsm8k_accuracy, gsm8k_count, gsm_finite = evaluate_gsm8k(
         model, tokenizer, settings
     )
@@ -429,6 +458,8 @@ def run_quality_evaluation(
         gsm8k_accuracy=gsm8k_accuracy,
         gsm8k_sample_count=gsm8k_count,
         all_finite=ppl_finite and gsm_finite,
+        greedy_token_ids=greedy_token_ids,
+        target_logprobs=target_logprobs,
     )
 
 
@@ -438,6 +469,60 @@ def write_quality_result(path: Path, payload: Mapping[str, object]) -> None:
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+
+
+def _trace_values(
+    payload: Mapping[str, object],
+    *,
+    label: str,
+) -> tuple[list[int], list[float]]:
+    trace = _mapping(payload.get("token_trace"), f"{label}.token_trace")
+    greedy_value = trace.get("greedy_token_ids")
+    logprob_value = trace.get("target_logprobs")
+    if not isinstance(greedy_value, list) or not all(
+        isinstance(value, int) and not isinstance(value, bool)
+        for value in greedy_value
+    ):
+        raise ValueError(f"{label}.token_trace.greedy_token_ids must be integers")
+    if not isinstance(logprob_value, list):
+        raise TypeError(f"{label}.token_trace.target_logprobs must be a list")
+    logprobs = [
+        _number(value, f"{label}.token_trace.target_logprobs")
+        for value in logprob_value
+    ]
+    if not greedy_value or len(greedy_value) != len(logprobs):
+        raise ValueError(f"{label} token trace must be non-empty with equal lengths")
+    return greedy_value, logprobs
+
+
+def compare_token_traces(
+    baseline: Mapping[str, object],
+    candidate: Mapping[str, object],
+) -> dict[str, int | float]:
+    baseline_greedy, baseline_logprobs = _trace_values(baseline, label="baseline")
+    candidate_greedy, candidate_logprobs = _trace_values(
+        candidate, label="candidate"
+    )
+    if len(baseline_greedy) != len(candidate_greedy):
+        raise ValueError("quality token traces use different sample counts")
+    sample_count = len(baseline_greedy)
+    agreements = sum(
+        baseline_id == candidate_id
+        for baseline_id, candidate_id in zip(
+            baseline_greedy, candidate_greedy, strict=True
+        )
+    )
+    absolute_drift = sum(
+        abs(baseline_value - candidate_value)
+        for baseline_value, candidate_value in zip(
+            baseline_logprobs, candidate_logprobs, strict=True
+        )
+    )
+    return {
+        "sample_count": sample_count,
+        "greedy_token_agreement": agreements / sample_count,
+        "mean_absolute_target_logprob_drift": absolute_drift / sample_count,
+    }
 
 
 def _at_most(observed: float, threshold: float) -> bool:
@@ -457,6 +542,10 @@ def evaluate_quality_gates(
     max_absolute_gsm8k_drop: float,
     finite_required: bool,
 ) -> QualityGateResult:
+    if baseline.get("mode") != "bf16":
+        raise ValueError("quality baseline mode must be 'bf16'")
+    if candidate.get("mode") != "nvfp4-unfused":
+        raise ValueError("quality candidate mode must be 'nvfp4-unfused'")
     for field in ("model", "model_revision", "seed"):
         if baseline.get(field) != candidate.get(field):
             raise ValueError(f"quality results use different {field}")
@@ -502,11 +591,179 @@ def evaluate_quality_gates(
     )
 
 
+def build_quality_comparison(
+    baseline: Mapping[str, object],
+    candidate: Mapping[str, object],
+    settings: QualitySettings,
+) -> tuple[dict[str, object], QualityGateResult]:
+    gate = evaluate_quality_gates(
+        baseline,
+        candidate,
+        max_relative_perplexity_increase=(
+            settings.max_relative_perplexity_increase
+        ),
+        max_absolute_gsm8k_drop=settings.max_absolute_gsm8k_drop,
+        finite_required=settings.finite_required,
+    )
+    comparison: dict[str, object] = {
+        "perplexity_relative_increase": gate.perplexity_relative_increase,
+        "gsm8k_absolute_drop": gate.gsm8k_absolute_drop,
+        **compare_token_traces(baseline, candidate),
+        "gates": {
+            "perplexity_passed": gate.perplexity_passed,
+            "gsm8k_passed": gate.gsm8k_passed,
+            "finite_passed": gate.finite_passed,
+            "passed": gate.passed,
+        },
+    }
+    return comparison, gate
+
+
+def _collect_evidence_environment() -> Mapping[str, object]:
+    environment_script = runpy.run_path(
+        str(PROJECT_ROOT / "scripts" / "check_environment.py")
+    )
+    facts = environment_script["collect_environment"]()
+    facts.require_sm120_b12x()
+    return cast(Mapping[str, object], facts.as_manifest())
+
+
+def _environment_package(
+    environment: Mapping[str, object],
+    package: str,
+    *,
+    default: str,
+) -> str:
+    packages = _mapping(environment.get("packages"), "environment.packages")
+    value = packages.get(package, default)
+    return _string(value, f"environment.packages.{package}")
+
+
+def write_quality_evidence(
+    path: Path,
+    *,
+    raw_path: Path,
+    settings: QualitySettings,
+    command: str,
+    gate: QualityGateResult | None,
+    environment: Mapping[str, object] | None = None,
+) -> None:
+    manifest = environment or _collect_evidence_environment()
+    compute_capability = manifest.get("compute_capability")
+    if isinstance(compute_capability, (tuple, list)):
+        compute_capability = ".".join(str(part) for part in compute_capability)
+    if gate is None:
+        raw_payload = _mapping(
+            json.loads(raw_path.read_text(encoding="utf-8")), "quality"
+        )
+        finite_passed = raw_payload.get("all_finite") is True
+        gate_payload: dict[str, object] = {
+            "name": "finite_values",
+            "threshold": "all finite",
+            "observed": "all finite" if finite_passed else "non-finite detected",
+            "passed": finite_passed,
+        }
+    else:
+        gate_payload = {
+            "name": "unfused_quality_feasibility",
+            "threshold": (
+                f"ppl<={settings.max_relative_perplexity_increase},"
+                f"gsm8k_drop<={settings.max_absolute_gsm8k_drop},finite"
+            ),
+            "observed": (
+                f"ppl={gate.perplexity_relative_increase},"
+                f"gsm8k_drop={gate.gsm8k_absolute_drop},"
+                f"finite={gate.finite_passed}"
+            ),
+            "passed": gate.passed,
+        }
+    try:
+        vllm_version = importlib.metadata.version("vllm")
+    except importlib.metadata.PackageNotFoundError:
+        vllm_version = "not-installed"
+    payload = {
+        "schema_version": 1,
+        "upstream": {
+            "flashinfer_sha": _string(
+                manifest.get("flashinfer_sha"), "environment.flashinfer_sha"
+            ),
+            "vllm_sha": _string(
+                manifest.get("vllm_sha"), "environment.vllm_sha"
+            ),
+        },
+        "environment": {
+            "gpu_name": _string(
+                manifest.get("gpu_product_name"), "environment.gpu_product_name"
+            ),
+            "compute_capability": _string(
+                compute_capability, "environment.compute_capability"
+            ),
+            "cuda_version": _string(
+                manifest.get("torch_cuda"), "environment.torch_cuda"
+            ),
+            "pytorch_version": _string(
+                manifest.get("pytorch"), "environment.pytorch"
+            ),
+            "flashinfer_version": _environment_package(
+                manifest, "flashinfer-python", default="not-installed"
+            ),
+            "vllm_version": vllm_version,
+        },
+        "seed": settings.seed,
+        "command": command,
+        "raw_samples": {
+            "reference": f"external://quality/{raw_path.name}",
+            "sha256": hashlib.sha256(raw_path.read_bytes()).hexdigest(),
+        },
+        "gate": gate_payload,
+    }
+    write_quality_result(path, payload)
+
+
+def _quality_command(args: argparse.Namespace) -> str:
+    parts = [
+        "python scripts/run_quality_eval.py",
+        f"--model {args.model}",
+        f"--mode {args.mode}",
+        f"--output external://quality/{args.output.name}",
+    ]
+    if args.baseline is not None:
+        parts.append(f"--baseline external://quality/{args.baseline.name}")
+    return " ".join(parts)
+
+
+def _baseline_path(args: argparse.Namespace) -> Path:
+    if args.baseline is not None:
+        return cast(Path, args.baseline)
+    suffix = "-unfused"
+    if args.output.stem.endswith(suffix):
+        baseline_stem = args.output.stem[: -len(suffix)] + "-bf16"
+        inferred = args.output.with_name(baseline_stem + args.output.suffix)
+        if inferred.is_file():
+            return cast(Path, inferred)
+    raise SystemExit(
+        "nvfp4-unfused mode requires --baseline or a sibling *-bf16.json result"
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run fixed Qwen quality evaluation")
     parser.add_argument("--model", required=True)
     parser.add_argument("--mode", choices=("bf16", "nvfp4-unfused"), required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--evidence-output",
+        type=Path,
+        help="EvidenceRecord wrapper path (defaults beside --output)",
+    )
+    parser.add_argument(
+        "--baseline",
+        type=Path,
+        help=(
+            "BF16 raw result for nvfp4-unfused mode; inferred from a sibling "
+            "*-bf16.json when omitted"
+        ),
+    )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--device", default="cuda")
     return parser.parse_args()
@@ -516,11 +773,33 @@ def main() -> int:
     args = parse_args()
     settings = load_quality_settings(args.config, args.model)
     payload = run_quality_evaluation(settings, mode=args.mode, device=args.device)
+    gate: QualityGateResult | None = None
+    if args.mode == "nvfp4-unfused":
+        baseline_path = _baseline_path(args)
+        baseline = _mapping(
+            json.loads(baseline_path.read_text(encoding="utf-8")), "baseline"
+        )
+        comparison, gate = build_quality_comparison(baseline, payload, settings)
+        payload["comparison"] = comparison
+    elif args.baseline is not None:
+        raise SystemExit("bf16 mode does not accept --baseline")
     write_quality_result(args.output, payload)
-    if settings.finite_required and payload["all_finite"] is not True:
-        return 1
-    print(json.dumps(payload, indent=2, sort_keys=True))
-    return 0
+    evidence_output = args.evidence_output or args.output.with_name(
+        f"{args.output.stem}-evidence.json"
+    )
+    write_quality_evidence(
+        evidence_output,
+        raw_path=args.output,
+        settings=settings,
+        command=_quality_command(args),
+        gate=gate,
+    )
+    console_payload = dict(payload)
+    console_payload.pop("token_trace", None)
+    print(json.dumps(console_payload, indent=2, sort_keys=True))
+    if gate is not None:
+        return 0 if gate.passed else 1
+    return 0 if not settings.finite_required or payload["all_finite"] is True else 1
 
 
 if __name__ == "__main__":

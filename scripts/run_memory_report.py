@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 from pathlib import Path
 from typing import NamedTuple
@@ -20,6 +21,7 @@ class MemoryResult(NamedTuple):
     block_scale_bytes: int
     global_scale_bytes: int
     padding_bytes: int
+    steady_state_cuda_bytes: int
     peak_cuda_bytes: int
 
     @property
@@ -91,6 +93,7 @@ def build_memory_payload(result: MemoryResult) -> dict[str, object]:
         "padding_bytes": result.padding_bytes,
         "quantized_allocated_bytes": result.quantized_allocated_bytes,
         "reduction": result.reduction,
+        "steady_state_cuda_bytes": result.steady_state_cuda_bytes,
         "peak_cuda_bytes": result.peak_cuda_bytes,
     }
 
@@ -119,14 +122,14 @@ def run_memory_report(
 
     import run_quality_eval
 
-    eligible = [
-        (name, module)
+    eligible_names = [
+        name
         for name, module in model.named_modules()
         if name
         and isinstance(module, torch.nn.Linear)
         and run_quality_eval.is_eligible_linear(name)
     ]
-    if not eligible:
+    if not eligible_names:
         raise RuntimeError("no eligible dense projection layers were found")
 
     bf16_bytes = 0
@@ -134,7 +137,10 @@ def run_memory_report(
     block_scale_bytes = 0
     global_scale_bytes = 0
     padding_bytes = 0
-    for name, linear in eligible:
+    for name in eligible_names:
+        linear = model.get_submodule(name)
+        if not isinstance(linear, torch.nn.Linear):
+            raise TypeError(f"eligible module {name!r} is not linear")
         bf16_bytes += linear.weight.numel() * linear.weight.element_size()
         quantized = quantize_weight(linear.weight.detach())
         rows, columns = quantized.logical_shape
@@ -149,18 +155,28 @@ def run_memory_report(
         parent = model.get_submodule(parent_name) if parent_name else model
         parent.add_module(child_name, Nvfp4Linear(quantized, bias))
 
+    del linear, quantized, bias
+    gc.collect()
+    if device.startswith("cuda"):
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize(device)
+        steady_state_cuda_bytes = torch.cuda.memory_allocated(device)
+    else:
+        steady_state_cuda_bytes = 0
+
     peak_cuda_bytes = (
         torch.cuda.max_memory_allocated(device) if device.startswith("cuda") else 0
     )
     return MemoryResult(
         model=model_name,
         model_revision=model_revision,
-        eligible_weight_count=len(eligible),
+        eligible_weight_count=len(eligible_names),
         bf16_bytes=bf16_bytes,
         packed_bytes=packed_bytes,
         block_scale_bytes=block_scale_bytes,
         global_scale_bytes=global_scale_bytes,
         padding_bytes=padding_bytes,
+        steady_state_cuda_bytes=int(steady_state_cuda_bytes),
         peak_cuda_bytes=int(peak_cuda_bytes),
     )
 
