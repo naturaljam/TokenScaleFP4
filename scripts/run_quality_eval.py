@@ -7,6 +7,7 @@ import hashlib
 import importlib.metadata
 import json
 import math
+import os
 import random
 import re
 import runpy
@@ -304,20 +305,60 @@ def _model_device(model: Any) -> Any:
     return next(model.parameters()).device
 
 
+def load_dataset_split(
+    settings: EvaluationSettings,
+    *,
+    split: str,
+    loader: Callable[..., Any] | None = None,
+    snapshot_resolver: Callable[..., str] | None = None,
+) -> Any:
+    if loader is None:
+        from datasets import load_dataset
+
+        loader = load_dataset
+    if os.environ.get("HF_HUB_OFFLINE") != "1":
+        return loader(
+            settings.dataset,
+            name=settings.subset,
+            split=split,
+            revision=settings.revision,
+        )
+
+    if snapshot_resolver is None:
+        from huggingface_hub import snapshot_download
+
+        snapshot_resolver = snapshot_download
+    snapshot = Path(
+        snapshot_resolver(
+            repo_id=settings.dataset,
+            repo_type="dataset",
+            revision=settings.revision,
+            local_files_only=True,
+        )
+    )
+    parquet_files = sorted(
+        str(path)
+        for path in (snapshot / settings.subset).glob(f"{split}-*.parquet")
+        if path.is_file()
+    )
+    if not parquet_files:
+        raise FileNotFoundError(
+            f"offline snapshot has no {settings.subset}/{split} parquet files"
+        )
+    return loader("parquet", data_files={split: parquet_files}, split=split)
+
+
 def evaluate_perplexity(
     model: Any,
     tokenizer: Any,
     settings: QualitySettings,
 ) -> tuple[float, int, bool, list[int], list[float]]:
     import torch
-    from datasets import load_dataset
     from torch.nn import functional
 
-    dataset = load_dataset(
-        settings.perplexity.dataset,
-        name=settings.perplexity.subset,
+    dataset = load_dataset_split(
+        settings.perplexity,
         split=settings.perplexity.split,
-        revision=settings.perplexity.revision,
     )
     text = "\n\n".join(
         _string(row.get("text"), "wikitext.text")
@@ -368,19 +409,14 @@ def evaluate_gsm8k(
     settings: QualitySettings,
 ) -> tuple[float, int, bool]:
     import torch
-    from datasets import load_dataset
 
-    train = load_dataset(
-        settings.gsm8k.dataset,
-        name=settings.gsm8k.subset,
+    train = load_dataset_split(
+        settings.gsm8k,
         split="train",
-        revision=settings.gsm8k.revision,
     )
-    test = load_dataset(
-        settings.gsm8k.dataset,
-        name=settings.gsm8k.subset,
+    test = load_dataset_split(
+        settings.gsm8k,
         split=settings.gsm8k.split,
-        revision=settings.gsm8k.revision,
     )
     rng = random.Random(settings.seed)
     fewshot_indices = rng.sample(range(len(train)), GSM8K_FEWSHOT_COUNT)

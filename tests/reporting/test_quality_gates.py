@@ -351,6 +351,55 @@ def test_quality_settings_require_pinned_model_and_dataset_revisions(
         quality.load_quality_settings(path, "Qwen/Qwen2.5-1.5B")
 
 
+def test_offline_dataset_loading_resolves_pinned_snapshot_parquet(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    quality = load_script("run_quality_eval.py")
+    settings = quality.EvaluationSettings(
+        dataset="Salesforce/wikitext",
+        subset="wikitext-2-raw-v1",
+        split="test",
+        revision="2" * 40,
+        seed=20260803,
+    )
+    data_dir = tmp_path / settings.subset
+    data_dir.mkdir()
+    parquet = data_dir / "test-00000-of-00001.parquet"
+    parquet.write_bytes(b"fixture")
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def fake_loader(*args: object, **kwargs: object) -> str:
+        calls.append((args, kwargs))
+        return "dataset"
+
+    def fake_snapshot(**kwargs: object) -> str:
+        assert kwargs == {
+            "repo_id": settings.dataset,
+            "repo_type": "dataset",
+            "revision": settings.revision,
+            "local_files_only": True,
+        }
+        return str(tmp_path)
+
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+
+    result = quality.load_dataset_split(
+        settings,
+        split="test",
+        loader=fake_loader,
+        snapshot_resolver=fake_snapshot,
+    )
+
+    assert result == "dataset"
+    assert calls == [
+        (
+            ("parquet",),
+            {"data_files": {"test": [str(parquet)]}, "split": "test"},
+        )
+    ]
+
+
 def test_quality_payload_records_pinned_inputs_and_full_sample_counts() -> None:
     quality = load_script("run_quality_eval.py")
     settings = quality.load_quality_settings(
