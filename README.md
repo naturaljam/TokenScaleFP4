@@ -73,7 +73,7 @@ cd TokenScaleFP4
 python -m venv .venv
 # Linux/macOS: source .venv/bin/activate
 # Windows:    .venv\\Scripts\\Activate.ps1
-python -m pip install -e ".[dev]"
+python -m pip install -e ".[dev,gpu]"
 
 python -m pytest -m "not sm120" -q
 python -m ruff check .

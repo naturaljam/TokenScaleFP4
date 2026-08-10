@@ -19,7 +19,7 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: python -m pip install -e ".[dev]"
+      - run: python -m pip install -e ".[dev,gpu]"
       - run: ruff check .
       - run: npx --yes pyright@1.1.411 src
       - run: pytest -m "not sm120" -q
