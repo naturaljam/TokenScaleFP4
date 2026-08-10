@@ -52,6 +52,9 @@ forks/
 .cache/
 torch_extensions/
 
+# Internal project research and execution notes
+docs/
+
 # Raw profiling and local experiment artifacts
 artifacts/
 profiles/raw/
