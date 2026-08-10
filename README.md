@@ -5,36 +5,67 @@
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-2F8552.svg)](LICENSE)
 
 [![English](https://img.shields.io/badge/README-English-111827?style=for-the-badge)](README.md)
-[![中文](https://img.shields.io/badge/README-中文-0f766e?style=for-the-badge)](README.zh-CN.md)
+[![Chinese](https://img.shields.io/badge/README-中文-0f766e?style=for-the-badge)](README.zh-CN.md)
 
-**A focused AI Infra project for making dynamic, per-token NVFP4 inference practical on consumer Blackwell SM120 GPUs.**
+**Experimental NVFP4 inference infrastructure for per-token activation scaling on NVIDIA Blackwell SM120 GPUs.**
 
-TokenScaleFP4 is my primary open-source project for studying the boundary between quantization contracts, GPU kernel dispatch, and reproducible inference evidence. It builds a small, testable foundation around NVFP4 rather than presenting an unverified end-to-end speedup claim.
+TokenScaleFP4 is building an end-to-end path from a precise quantization contract to a fused FlashInfer GEMM and, eventually, vLLM online dense quantization. The project focuses on one concrete problem: preserving the scale produced by per-token activation quantization and applying it to the correct output row without adding a separate post-GEMM kernel.
 
-## What It Delivers
+## The Problem
 
-- A precise NVFP4 contract and FP32/BF16 reference implementation.
-- An unfused per-token row-scale oracle for checking future fused kernels.
-- FlashInfer-oriented SM120 shape, backend, patch, and dispatch helpers.
-- Public input-validation and evidence-reporting schemas for repeatable experiments.
-- A CI-tested Python package that keeps hardware-specific tests separate from portable tests.
+Dynamic NVFP4 activation quantization produces a scale for every logical input row. FlashInfer's existing `mm_fp4` scalar `alpha` represents a global weight scale, so it cannot also carry an `M`-element activation scale.
 
-The public repository intentionally contains source, tests, scripts, and reproducibility metadata only. Private research notes, rented-machine details, raw profiler output, and model artifacts stay outside the repository.
+The target computation is:
 
-## Current Scope
+```text
+Y[m, n] = BF16(
+    per_token_scale[m] * alpha * block_scaled_fp4_dot(A[m, :], W[n, :])
+)
+```
 
-The current public baseline is experimental and deliberately narrow:
+TokenScaleFP4 defines that contract, validates it against a dequantized FP32 reference, and prepares the API and test surface required to fuse `per_token_scale[m]` into the SM120 b12x GEMM epilogue.
 
-- NVIDIA Blackwell **SM120 only**
-- NVFP4, group size 16, with the documented 128x4 scale layout
-- BF16 output and TP1-oriented shapes
-- Reference/oracle and API-validation layers first; production fused-kernel and vLLM integration remain follow-up work
+## Target Path
 
-This project does not claim support for SM100/SM103, MoE quantization, FP8, training, KV cache, multi-GPU execution, or a guaranteed end-to-end win over BF16.
+```text
+BF16 activation [M, K]
+  -> per-token NVFP4 quantization
+  -> packed activation + block scales + row scale [M]
+  -> FlashInfer b12x FP4 GEMM
+  -> fused alpha * row_scale[m]
+  -> BF16 output [M, N]
+  -> vLLM dense linear dispatch
+```
+
+The fused path is intended to remove the extra row-scaling launch used by the current oracle while preserving the scalar path, preallocated output, compilation cache behavior, and CUDA Graph replay.
+
+## What Is Implemented
+
+| Area | Available now |
+| --- | --- |
+| Contract | SM120 NVFP4 shape, block-size, BF16 output, and FP32 row-scale validation |
+| Reference | E2M1 unpacking, 128x4 E4M3 scale decoding, FP32 GEMM, and BF16 output |
+| Oracle | Per-token activation quantization and unfused `mm_fp4 + row scale` execution |
+| Kernel lab | FlashInfer b12x dispatch helpers, Qwen shape handling, and pinned upstream revisions |
+| Evidence | Numerical metrics, quality/memory gates, revision capture, and validated evidence records |
+| Tests | 167 portable tests plus opt-in SM120 smoke/oracle tests |
+
+The fused row-scale epilogue, complete vLLM dense online path, and final rented-GPU performance evidence are still in progress. This repository does not present them as finished features.
+
+## Scope
+
+- NVIDIA Blackwell **SM120**
+- NVFP4 with group size 16 and 128x4 scale storage
+- BF16 activation and output
+- FlashInfer b12x backend
+- TP1 dense linear layers
+- Qwen2.5 projection shapes as the primary validation set
+
+SM100/SM103, MoE, FP8, training, KV cache, and multi-GPU execution are outside the current scope. There is no claim of an end-to-end speedup over BF16 until model-level measurements are complete.
 
 ## Quick Start
 
-Requirements: Python 3.11-3.13. GPU-only smoke tests additionally require an SM120 GPU, CUDA 13+, and the pinned upstream environment.
+Portable development requires Python 3.11-3.13. SM120 tests additionally require Linux or WSL2, CUDA 13+, an SM120 GPU, and the pinned FlashInfer checkout.
 
 ```bash
 git clone https://github.com/naturaljam/TokenScaleFP4.git
@@ -43,33 +74,30 @@ python -m venv .venv
 # Linux/macOS: source .venv/bin/activate
 # Windows:    .venv\\Scripts\\Activate.ps1
 python -m pip install -e ".[dev]"
+
 python -m pytest -m "not sm120" -q
 python -m ruff check .
 python -m pyright src
 python scripts/audit_public_repo.py --tracked
 ```
 
-The portable suite covers the reference contract, shape and dispatch logic, patch ownership, reporting schemas, and public-repository checks. `sm120` tests are opt-in and fail closed when the required hardware or Linux/CUDA environment is unavailable.
-
 ## Repository Map
 
 ```text
-src/tokenscalefp4/       public package: contracts, reference, kernel lab, reporting
-tests/                   portable contracts and opt-in SM120 tests
-scripts/                 environment, revision, audit, memory, quality, and smoke helpers
-configs/                 deterministic shape and evaluation configuration
-schemas/                 machine-readable evidence contracts
-upstream/                pinned upstream base revisions
+src/tokenscalefp4/contracts/      public input and shape contracts
+src/tokenscalefp4/reference/      NVFP4 dequantization and FP32 oracle
+src/tokenscalefp4/kernel_lab/     FlashInfer dispatch and unfused execution
+src/tokenscalefp4/reporting/      evidence records and validation
+tests/                            portable and opt-in SM120 coverage
+scripts/                          environment, evaluation, audit, and smoke tools
+configs/                          fixed shape and quality configurations
+upstream/                         pinned FlashInfer and vLLM base revisions
 ```
 
-## Engineering Position
+## Validation Rules
 
-The central design choice is to make every performance claim traceable: quantization semantics live in a reference contract, kernel behavior is compared with an unfused oracle, and reports are derived from structured evidence. The goal is a credible path to FlashInfer and vLLM contributions, not a benchmark screenshot detached from its environment.
-
-## Status
-
-The reference layer, portable validation suite, public audit, and initial SM120 kernel-lab scaffolding are available now. The fused row-scale kernel, full vLLM dense online path, rented-GPU quality/performance evidence, and upstream submissions are intentionally not represented as complete.
+The project uses fixed gates instead of hand-picked examples. The reference and oracle suites check row-scale shape and layout, scalar-path compatibility, BF16 output behavior, numerical error, invalid inputs, output buffers, and representative Qwen dimensions. Hardware results remain separate from portable CI so that a green public build does not imply an SM120 performance result.
 
 ## License
 
-TokenScaleFP4 is released under the [Apache License 2.0](LICENSE).
+TokenScaleFP4 is available under the [Apache License 2.0](LICENSE).
